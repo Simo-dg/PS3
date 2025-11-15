@@ -162,7 +162,7 @@ def _cost_cdf_from_wins(wins: np.ndarray, N_use: int, downsample: int = 140):
     max_ratio = np.percentile(w, 95) - np.percentile(w, 5)  # Use range as scale
     ratio = np.clip(ratio, 0, max_ratio)
     
-    c_win = w - (N_use / (N_use - 1.0)) * ratio
+    c_win = w - (1 / (N_use - 1.0)) * ratio
 
     # Step 3: Estimate pseudo CDF and PDF
     # Sort c_win and get its ECDF
