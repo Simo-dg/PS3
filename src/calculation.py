@@ -224,18 +224,28 @@ def _load_dataset(path: str) -> pd.DataFrame:
             ].copy()
         raise ValueError("Input must have columns 'num_bidders' and 'lowest_bid' (or 'N' and 'W').")
 
-def run(in_path: str, out_csv: str, out_pdf: str, min_obs: int = 12, max_band: int = 2):
+def run(in_path: str, out_csv: str, out_pdf: str, min_obs: int = 12, max_band: int = 2, 
+        remove_outliers: bool = True, outlier_percentile: float = 95.0):
     df = _load_dataset(in_path)
     # clean: keep only positive bids, but keep N>=1 for percentile calculation
     df = df[(df["lowest_bid"].astype(float) > 0)].copy()
     df["num_bidders"] = df["num_bidders"].astype(int)
     df["lowest_bid"] = df["lowest_bid"].astype(float)
 
-    # pick 3 competition levels (using ALL data including N=1 for percentiles)
-    groups = _pick_groups(df["num_bidders"], min_obs=min_obs, max_band=max_band)
+    # Remove extreme outliers (optional, default True at 95th percentile)
+    if remove_outliers:
+        threshold = df["lowest_bid"].quantile(outlier_percentile / 100.0)
+        n_before = len(df)
+        df = df[df["lowest_bid"] <= threshold].copy()
+        n_removed = n_before - len(df)
+        if n_removed > 0:
+            print(f"[INFO] Removed {n_removed} extreme outliers (>{threshold/1e6:.1f}M$, {outlier_percentile}th percentile)")
 
-    # Now filter out N=1 for estimation (GPV requires N>=2)
-    df = df[df["num_bidders"] >= 2].copy()
+    # Filter out N<=2 for estimation (N=2 has high variance causing negative costs)
+    df = df[df["num_bidders"] >= 3].copy()
+
+    # pick 3 competition levels (now using only N>=3 for percentiles)
+    groups = _pick_groups(df["num_bidders"], min_obs=min_obs, max_band=max_band)
 
     rows = []
     curves = []
@@ -255,7 +265,7 @@ def run(in_path: str, out_csv: str, out_pdf: str, min_obs: int = 12, max_band: i
 
         curves.append((g["level"], f"{g['label']} (N≈{N_use})", c, FC))
         for ci, fi in zip(c, FC):
-            rows.append(dict(level=g["level"], N_label=g["label"], N_used=N_use, c=ci, FC=fi))
+            rows.append(dict(level=g["level"], N_label=g["label"], N_used=N_use, c=ci/1e6, FC=fi))
         print(f"[OK] {g['level']:>6} | {g['label']:<10} | used N={N_use:<2} | obs={wins.size:<4} | grid={c.size}")
 
     # save CSV
@@ -268,12 +278,13 @@ def run(in_path: str, out_csv: str, out_pdf: str, min_obs: int = 12, max_band: i
         colors = {'low': 'C0', 'median': 'C1', 'high': 'C2'}
         
         for level, label, c, FC in curves:
+            c = c / 1e6  # Convert to millions for plot
             plt.step(c, FC, where="post", 
                     label=f"{level.capitalize()}  {label}",
                     color=colors.get(level, 'black'),
                     linewidth=2)
         
-        plt.xlabel("Cost, c", fontsize=11)
+        plt.xlabel("Cost (millions $)", fontsize=11)
         plt.ylabel(r"$\hat F_C(c)$", fontsize=11)
         plt.title("Estimated Cost CDFs by Competition Level", fontsize=12)
         plt.grid(True, alpha=0.35)
@@ -295,5 +306,11 @@ if __name__ == "__main__":
     ap.add_argument("--out-pdf", default="data/FC_steps_plot.pdf", help="Output PDF path")
     ap.add_argument("--min-obs", type=int, default=12, help="Min obs per group before pooling")
     ap.add_argument("--max-band", type=int, default=2, help="Max pooling half-width for N (±band)")
+    ap.add_argument("--no-remove-outliers", action="store_true", help="Keep extreme outliers")
+    ap.add_argument("--outlier-percentile", type=float, default=95.0, 
+                    help="Percentile threshold for outlier removal (default: 95.0)")
     args = ap.parse_args()
-    run(args.in_path, args.out_csv, args.out_pdf, min_obs=args.min_obs, max_band=args.max_band)
+    run(args.in_path, args.out_csv, args.out_pdf, 
+        min_obs=args.min_obs, max_band=args.max_band,
+        remove_outliers=not args.no_remove_outliers,
+        outlier_percentile=args.outlier_percentile)
