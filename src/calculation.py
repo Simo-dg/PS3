@@ -16,12 +16,7 @@ What this script does (per assignment):
        - data/FC_steps.csv  (columns: level, N_label, N_used, c, FC)
        - data/FC_steps_plot.pdf  (single page: three step CDFs)
 
-Accepts either:
-  - CSV with columns: num_bidders, lowest_bid
-  - or a .dat like professor's nlp.dat with columns: t N W Z (we only use N and W)
-
-References to assignment:
-  - three step functions for low/median/high competition (25th/50th/75th pct of N), pooling allowed.
+Accepts CSV with columns: num_bidders, lowest_bid
 """
 
 import argparse
@@ -188,50 +183,6 @@ def _pick_groups(N_series: pd.Series, min_obs: int = 12, max_band: int = 2):
 
 # ------------------------- GPV core -------------------------
 
-def _triweight_kernel_pdf(pseudo_bids: np.ndarray) -> np.ndarray:
-    """
-    Triweight kernel density estimator following the assignment notebook.
-    
-    This is an alternative implementation specifically for pseudo-cost smoothing,
-    matching the methodology in GPVprocurement.ipynb.
-    
-    Bandwidth formula:
-        delta = 2.978 * 1.06 * var(data)^(-1/6)
-        
-    For each point, calculates kernel density as weighted average of all points.
-    
-    Args:
-        pseudo_bids: Array of pseudo-cost values to smooth
-        
-    Returns:
-        Density estimate at each pseudo-bid value
-    """
-    sorted_bids = np.sort(pseudo_bids)
-    n = len(pseudo_bids)
-    pseudo_pdf = np.zeros_like(pseudo_bids)
-    
-    # Bandwidth calculation adapted from Silverman for triweight
-    delta = 2.978 * 1.06 * (np.var(pseudo_bids)**(1/2)) ** (-1/6)
-    
-    # Evaluate density at each sorted point
-    for r in range(n):
-        # Standardized distances from current point
-        obj_triw = (1/delta) * (sorted_bids - sorted_bids[r])
-        
-        # Apply triweight kernel
-        triweightker = np.where(
-            np.abs(obj_triw) <= 1, 
-            (35/32) * (1 - obj_triw**2)**3, 
-            0
-        )
-        
-        # Sum kernel weights and normalize
-        striweightker = (1/delta) * np.sum(triweightker)
-        pseudo_pdf[r] = (1/n) * striweightker
-    
-    return pseudo_pdf
-
-
 def _empirical_cdf(values: np.ndarray) -> np.ndarray:
     """
     Calculate simple empirical CDF following the assignment notebook.
@@ -356,64 +307,55 @@ def _cost_cdf_from_wins(wins: np.ndarray, N_use: int, downsample: int = 140):
 
 def _load_dataset(path: str) -> pd.DataFrame:
     """
-    Load auction data from CSV or DAT file.
+    Load auction data from CSV file.
     
-    Accepts two formats:
-        1. CSV with columns: num_bidders, lowest_bid
-        2. DAT with whitespace-separated columns: t N W Z
-           (we only use N for number of bidders and W for winning bid)
+    Accepts CSV with columns: num_bidders, lowest_bid
+    (Also accepts N, W as alternative column names)
     
     Args:
-        path: File path to data file
+        path: File path to CSV file
         
     Returns:
         DataFrame with standardized columns: num_bidders, lowest_bid
         
     Raises:
-        ValueError: If required columns are not found
+        ValueError: If required columns are not found or file is not CSV
     """
     p = Path(path)
     
-    # Handle .dat format (professor's format)
-    if p.suffix.lower() == ".dat":
-        df = pd.read_csv(
-            p, 
-            delim_whitespace=True, 
-            header=None, 
-            names=["t", "N", "W", "Z"]
-        )
-        out = pd.DataFrame({
-            "num_bidders": df["N"].astype(int), 
-            "lowest_bid": df["W"].astype(float)
-        })
-        return out
-    
-    # Handle CSV format
-    else:
-        df = pd.read_csv(p)
-        
-        # Create case-insensitive column lookup
-        cols = {c.strip().lower(): c for c in df.columns}
-        
-        # Try standard column names
-        if "num_bidders" in cols and "lowest_bid" in cols:
-            return df.rename(columns={
-                cols["num_bidders"]: "num_bidders", 
-                cols["lowest_bid"]: "lowest_bid"
-            })[["num_bidders", "lowest_bid"]].copy()
-        
-        # Try professor's column names (N, W)
-        if "n" in cols and "w" in cols:
-            return df.rename(columns={
-                cols["n"]: "num_bidders", 
-                cols["w"]: "lowest_bid"
-            })[["num_bidders", "lowest_bid"]].copy()
-        
-        # If we get here, required columns weren't found
+    # Verify it's a CSV file
+    if p.suffix.lower() not in [".csv"]:
         raise ValueError(
-            "Input must have columns 'num_bidders' and 'lowest_bid' "
-            "(or 'N' and 'W')."
+            f"Only CSV files are supported. Got: {p.suffix}\n"
+            f"Please provide a CSV file with columns 'num_bidders' and 'lowest_bid'."
         )
+    
+    # Load CSV
+    df = pd.read_csv(p)
+    
+    # Create case-insensitive column lookup
+    cols = {c.strip().lower(): c for c in df.columns}
+    
+    # Try standard column names
+    if "num_bidders" in cols and "lowest_bid" in cols:
+        return df.rename(columns={
+            cols["num_bidders"]: "num_bidders", 
+            cols["lowest_bid"]: "lowest_bid"
+        })[["num_bidders", "lowest_bid"]].copy()
+    
+    # Try alternative column names (N, W)
+    if "n" in cols and "w" in cols:
+        return df.rename(columns={
+            cols["n"]: "num_bidders", 
+            cols["w"]: "lowest_bid"
+        })[["num_bidders", "lowest_bid"]].copy()
+    
+    # If we get here, required columns weren't found
+    raise ValueError(
+        "CSV must have columns 'num_bidders' and 'lowest_bid' "
+        "(or 'N' and 'W'). "
+        f"Found columns: {list(df.columns)}"
+    )
 
 
 def run(in_path: str, out_csv: str, out_pdf: str, min_obs: int = 12, 
@@ -432,7 +374,7 @@ def run(in_path: str, out_csv: str, out_pdf: str, min_obs: int = 12,
         7. Create plot with three step functions
     
     Args:
-        in_path: Input data file path
+        in_path: Input CSV file path
         out_csv: Output CSV path for numerical results
         out_pdf: Output PDF path for plot
         min_obs: Minimum observations per group before pooling
@@ -565,13 +507,13 @@ def run(in_path: str, out_csv: str, out_pdf: str, min_obs: int = 12,
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser(
-        description="GPV assignment runner (three cost-CDF step functions)."
+        description="GPV assignment runner (three cost-CDF step functions from CSV)."
     )
     ap.add_argument(
         "--in", 
         dest="in_path", 
         default="data/bid_min_and_count.csv",
-        help="Input data: CSV with columns (num_bidders, lowest_bid) or .dat with N,W"
+        help="Input CSV file with columns (num_bidders, lowest_bid) or (N, W)"
     )
     ap.add_argument(
         "--out-csv", 
