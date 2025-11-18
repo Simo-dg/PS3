@@ -16,42 +16,29 @@ from bs4 import BeautifulSoup
 import pandas as pd
 from playwright.async_api import async_playwright
 
-# Pages to scrape
+# Directories and settings
 PAGES = [
     "https://www.codot.gov/business/bidding/bid-tab-archives/copy_of_bid-tabs-2023"
 ]
-
-# Output directory - relative to script location
-OUT_DIR = "../data"
-
-# Browser user agent string
 BROWSER_UA = (
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
     "AppleWebKit/537.36 (KHTML, like Gecko) "
     "Chrome/120.0 Safari/537.36"
 )
-
-# Delay between requests
 DELAY_SECONDS = 0.3
-
-# Timeout for requests and page loads (in seconds)
 REQUEST_TIMEOUT = 45
+
+OUT_DIR = "../data"
 
 # ============================================================================
 # 2) UTILITY FUNCTIONS
 # ============================================================================
-
 def slugify(text: str) -> str:
     """Convert text to a filesystem-safe filename."""
     text = re.sub(r"\s+", " ", text).strip()
     text = re.sub(r"[^\w\-\.\s\(\)]", "_", text)
     text = re.sub(r"\s", "_", text)
     return text[:120] or "file"
-
-def get_out_dir() -> str:
-    """Get the output directory path relative to the script location."""
-    script_dir = os.path.dirname(os.path.abspath(__file__))
-    return os.path.normpath(os.path.join(script_dir, OUT_DIR))
 
 def scrape_page_for_links(page_url: str) -> List[Tuple[str, str]]:
     """
@@ -172,13 +159,6 @@ async def fetch_pdf_via_browser(context, docpop_url: str, out_path_pdf: str, out
                 with open(out_path_pdf, "wb") as fp:
                     fp.write(pdf_bytes)
                 return True
-
-        # If no PDF found, save HTML for debugging
-        html = await page.content()
-        with open(out_path_html, "w", encoding="utf-8") as fp:
-            fp.write(html)
-        return False
-
     finally:
         await page.close()
 
@@ -186,71 +166,53 @@ async def fetch_pdf_via_browser(context, docpop_url: str, out_path_pdf: str, out
 # 4) MAIN SCRAPING ORCHESTRATION
 # ============================================================================
 
-async def run_cdot_scraper(
-    pages: Optional[List[str]] = None,
-    no_download: bool = False,
-    delay: float = DELAY_SECONDS,
-) -> pd.DataFrame:
+async def run_cdot_scraper() -> pd.DataFrame:
     """
     Main function to scrape CDOT bid tabs and download PDFs.
-    
     Returns DataFrame containing metadata for all discovered bid tabs.
     """
-    pages = pages or PAGES
-    out_dir = get_out_dir()
-    pdf_dir = os.path.join(out_dir, "pdf")
-    
-    os.makedirs(out_dir, exist_ok=True)
+    pdf_dir = os.path.join(OUT_DIR, "pdf")
+    os.makedirs(OUT_DIR, exist_ok=True)
     os.makedirs(pdf_dir, exist_ok=True)
-    
-    print(f"[INFO] Output folder: {out_dir}")
+    print(f"[INFO] Output folder: {OUT_DIR}")
     print(f"[INFO] PDF folder: {pdf_dir}")
 
     all_items: List[Tuple[str, str, str]] = []
-
-    # PHASE 1: Scrape all pages to find DocPop links
-    for page_url in pages:
+    for page_url in PAGES:
         try:
             items = scrape_page_for_links(page_url)
             print(f"[OK] {page_url}: found {len(items)} DocPop links")
             for text, docpop_url in items:
                 all_items.append((page_url, text, docpop_url))
-        except Exception as e:
-            print(f"[ERROR] {page_url}: {e}")
+        except Exception:
+            print(f"[ERROR] {page_url}")
 
     index_rows: List[Tuple[str, str, str]] = []
     rows: List[Dict[str, str]] = []
 
-    # Initialize Playwright browser (only if downloading)
     pw = browser = context = None
     try:
-        if not no_download and all_items:
+        if all_items:
             pw = await async_playwright().start()
             browser = await pw.chromium.launch(headless=True)
             context = await browser.new_context(user_agent=BROWSER_UA, accept_downloads=False)
 
-        # PHASE 2: Process each discovered DocPop link
         for page_url, text, docpop_url in all_items:
             index_rows.append((page_url, text, docpop_url))
-
             saved_path = ""
-            status = "skipped" if no_download else "html_saved"
-
-            if not no_download:
-                fname = f"{slugify(text)}.pdf"
-                out_pdf = os.path.join(pdf_dir, fname)
-                out_html = out_pdf.rsplit(".pdf", 1)[0] + ".html"
-
+            status = "html_saved"
+            fname = f"{slugify(text)}.pdf"
+            out_pdf = os.path.join(pdf_dir, fname)
+            out_html = out_pdf.rsplit(".pdf", 1)[0] + ".html"
+            if context:
                 ok = await fetch_pdf_via_browser(context, docpop_url, out_pdf, out_html)
                 if ok:
                     saved_path = out_pdf
                     status = "saved"
                     print(f"[OK] {fname}")
                 else:
-                    print(f"[WARN] Not a PDF. Saved HTML at: {out_html}")
-                
-                await asyncio.sleep(delay)
-
+                    print(f"[WARN] Not a PDF.")
+                await asyncio.sleep(DELAY_SECONDS)
             rows.append({
                 "page": page_url,
                 "anchor_text": text,
@@ -259,34 +221,27 @@ async def run_cdot_scraper(
                 "status": status,
             })
     finally:
-        # PHASE 3: Save index CSV
         try:
-            csv_path = save_csv(index_rows, out_dir)
+            csv_path = save_csv(index_rows, OUT_DIR)
             print(f"[OK] Index CSV: {csv_path}")
-        except Exception as e:
-            print(f"[WARN] Unable to write CSV: {e}")
-
+        except Exception:
+            print(f"[WARN] Unable to write CSV")
         if context:
             await context.close()
         if browser:
             await browser.close()
         if pw:
             await pw.stop()
-
     df = pd.DataFrame(rows)
     return df
 
 # ============================================================================
-# 5) ENTRY POINT
+# 5) MAIN ENTRY POINT
 # ============================================================================
 
 async def main():
     """Entry point when running as a script."""
-    df = await run_cdot_scraper(
-        pages=PAGES,
-        no_download=False,
-        delay=DELAY_SECONDS,
-    )
+    df = await run_cdot_scraper()
     return df
 
 if __name__ == "__main__":
