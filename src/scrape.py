@@ -203,9 +203,8 @@ async def run_cdot_scraper() -> pd.DataFrame:
             status = "html_saved"
             fname = f"{slugify(text)}.pdf"
             out_pdf = os.path.join(pdf_dir, fname)
-            out_html = out_pdf.rsplit(".pdf", 1)[0] + ".html"
             if context:
-                ok = await fetch_pdf_via_browser(context, docpop_url, out_pdf, out_html)
+                ok = await fetch_pdf_via_browser(context, docpop_url, out_pdf)
                 if ok:
                     saved_path = out_pdf
                     status = "saved"
