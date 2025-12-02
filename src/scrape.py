@@ -13,9 +13,13 @@ from playwright.async_api import async_playwright
 # Setup logging
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
-
-# Scraper settings
-PAGE_URL = "https://www.codot.gov/business/bidding/bid-tab-archives/copy_of_bid-tabs-2023"
+# Directories and settings
+PAGES = [
+    "https://www.codot.gov/business/bidding/bid-tab-archives/copy_of_bid-tabs-2023",
+    "https://www.codot.gov/business/bidding/bid-tab-archives/2023-bid-tabs/bid-tabs-2023",
+    "https://www.codot.gov/business/bidding/bid-tab-archives/2022-bid-tabs/copy_of_bid-tabs-2022",
+    "https://www.codot.gov/business/bidding/bid-tab-archives"
+]
 BROWSER_UA = (
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
     "AppleWebKit/537.36 (KHTML, like Gecko) "
@@ -120,7 +124,6 @@ async def page_fetch_bytes(page, url: str) -> Optional[bytes]:
     except Exception:
         return None
 
-
 async def fetch_pdf_via_browser(context, docpop_url: str, out_path_pdf: str) -> bool:
     """
     Use Playwright to navigate to a DocPop URL and download the PDF.
@@ -144,34 +147,33 @@ async def fetch_pdf_via_browser(context, docpop_url: str, out_path_pdf: str) -> 
         await page.close()
 
 
-async def run_cdot_scraper(page_url:str = PAGE_URL) -> pd.DataFrame:
+
+async def run_cdot_scraper(pages:List[str]=None) -> pd.DataFrame:
     """
-    Main function to scrape CDOT bid tabs and download PDFs.
+    Scrape CDOT bid tabs and download PDFs for all links in all pages in the list.
     Returns DataFrame containing metadata for all discovered bid tabs.
     """
-    # Setup output directories
+    if pages is None:
+        pages = PAGES
     pdf_dir = os.path.join(OUT_DIR, "pdf")
     os.makedirs(OUT_DIR, exist_ok=True)
     os.makedirs(pdf_dir, exist_ok=True)
     logger.info(f"Output folder: {OUT_DIR}")
     logger.info(f"PDF folder: {pdf_dir}")
 
-    # Get all DocPop links from the specified page
     all_links: List[Tuple[str, str, str]] = []
-    items = scrape_page_for_links(page_url)
-    logger.info(f"{page_url}: found {len(items)} DocPop links")
-    for text, docpop_url in items:
-        all_links.append((page_url, text, docpop_url))
+    for page_url in pages:
+        items = scrape_page_for_links(page_url)
+        logger.info(f"{page_url}: found {len(items)} DocPop links")
+        for text, docpop_url in items:
+            all_links.append((page_url, text, docpop_url))
 
-    # Process each DocPop link
-    index_rows: List[Tuple[str, str, str]] = []
     rows: List[Dict[str, str]] = []
     pw = await async_playwright().start()
     browser = await pw.chromium.launch(headless=True)
     context = await browser.new_context(user_agent=BROWSER_UA, accept_downloads=False)
 
     for page_url, text, docpop_url in all_links:
-        index_rows.append((page_url, text, docpop_url))
         saved_path = ""
         status = "html_saved"
         fname = f"{slugify(text)}.pdf"
@@ -195,7 +197,7 @@ async def run_cdot_scraper(page_url:str = PAGE_URL) -> pd.DataFrame:
 
     # Save index CSV
     csv_path = os.path.join(OUT_DIR, "cdot_bid_tabs_index.csv")
-    df = pd.DataFrame(rows, columns=["page", "anchor_text", "docpop_url"])
+    df = pd.DataFrame(rows, columns=["page", "anchor_text", "docpop_url", "saved_path", "status"])
     df.to_csv(csv_path, index=False)
     logger.info(f"Saved CSV: {csv_path}")
 
@@ -203,6 +205,7 @@ async def run_cdot_scraper(page_url:str = PAGE_URL) -> pd.DataFrame:
     await browser.close()
     await pw.stop()
     return df
+
 
 
 async def main():
