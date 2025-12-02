@@ -206,12 +206,9 @@ async def run_cdot_scraper(pages:List[str]=None) -> pd.DataFrame:
     await pw.stop()
     return df
 
-
-
 async def main():
     df = await run_cdot_scraper()
     return df
-
 
 if __name__ == "__main__":
     asyncio.run(main())
