@@ -1,18 +1,3 @@
-"""
-Parse CDOT Bid Tab summary tables (Rank/Vendor/Total Bid) from PDFs in data/pdf/
-and write CSV (file, num_bidders, lowest_bid) to data/bid_min_and_count.csv.
-
-This script extracts bidding information from CDOT (Colorado Department of Transportation)
-PDF bid tabs using regex-based line parsing.
-
-The target is the "Vendor Ranking" page which contains:
-- Rank (1, 2, 3, etc.)
-- Vendor ID
-- Vendor Name
-- Total Bid amount
-- Percent of Low Bid
-- Percent of Estimate
-"""
 import re
 from pathlib import Path
 from decimal import Decimal, InvalidOperation

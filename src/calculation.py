@@ -1,34 +1,31 @@
-"""
-Problem set: Nonparametric Estimation of First Price Procurement Auction (GPV)
-Run this from your repo root. 
-Reads: data/bid_min_and_count.csv
-Saves: data/FC_steps.csv, data/FC_steps_plot.pdf
-"""
-
 from pathlib import Path
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 from scipy.stats import gaussian_kde
+import logging
 
-# ------------------------- 1. Group Selection -------------------------
+# Setup logging
+logger = logging.getLogger(__name__)
+logging.basicConfig(level=logging.INFO)
+
 
 def _pick_groups(N_series: pd.Series, min_obs: int = 12, max_band: int = 2):
     """Pools bidders to find suitable Low/Median/High competition groups."""
     Ns = N_series.to_numpy()
     q25, q50, q75 = np.quantile(Ns, [0.25, 0.50, 0.75], method="nearest")
-    
+
     targets = [int(q25), int(q50), int(q75)]
     uniq = np.unique(Ns)
-    
+
     # Heuristic: if low == med targets, try to shift low target down
     if targets[0] == targets[1] and len(uniq) >= 3:
         low_cand = uniq[uniq <= targets[0]]
         if len(low_cand) >= 2: targets[0] = int(low_cand[-2])
-    
+
     levels = [("low", targets[0]), ("median", targets[1]), ("high", targets[2])]
     groups = []
-    
+
     for label, tgt in levels:
         N0 = int(uniq[np.argmin(np.abs(uniq - tgt))])
         band = 0
@@ -45,7 +42,6 @@ def _pick_groups(N_series: pd.Series, min_obs: int = 12, max_band: int = 2):
             band += 1
     return groups
 
-# ------------------------- 2. GPV Estimation -------------------------
 
 def _cost_cdf_from_wins(wins: np.ndarray, N_use: int, downsample: int = 140):
     """
@@ -73,35 +69,34 @@ def _cost_cdf_from_wins(wins: np.ndarray, N_use: int, downsample: int = 140):
     c_sorted = np.sort(c_win)
     Fz = np.arange(1, n + 1) / n
     Fc = 1.0 - np.power(1.0 - Fz, 1.0 / N_use)
-    
+
     # Enforce monotonicity and downsample for plotting
     Fc = np.clip(np.maximum.accumulate(Fc), 0.0, 1.0)
-    
+
     if c_sorted.size > downsample:
         step = max(1, c_sorted.size // downsample)
         c_sorted, Fc = c_sorted[::step], Fc[::step]
-    
+
     return c_sorted, Fc
 
-# ------------------------- 3. Main Pipeline -------------------------
 
-def run(in_path, out_csv, out_pdf):
-    print(f"Loading data from: {in_path}")
-    
+def main(in_path, out_csv, out_pdf):
+    logger.info(f"Loading data from: {in_path}")
+
     # --- Load & Clean ---
     try:
         # Only load the columns we strictly need
         df = pd.read_csv(in_path, usecols=["num_bidders", "lowest_bid"])
     except ValueError:
-        print("Error: CSV must contain 'num_bidders' and 'lowest_bid'.")
+        logger.error("CSV must contain 'num_bidders' and 'lowest_bid'.")
         return
     except FileNotFoundError:
-        print("Error: File not found. Make sure you are in the repo root.")
+        logger.error("File not found. Make sure you are in the repo root.")
         return
 
     # Basic filtering
     df = df[(df["lowest_bid"] > 0) & (df["num_bidders"] >= 2)].copy()
-    
+
     # Remove top 5% outliers to stabilize the KDE
     thresh = df["lowest_bid"].quantile(0.95)
     df = df[df["lowest_bid"] <= thresh].copy()
@@ -114,23 +109,23 @@ def run(in_path, out_csv, out_pdf):
         # Filter data for this group
         mask = (df["num_bidders"] >= g["Nmin"]) & (df["num_bidders"] <= g["Nmax"])
         wins = df.loc[mask, "lowest_bid"].to_numpy()
-        
-        if wins.size < 5: 
+
+        if wins.size < 5:
             continue
-        
+
         # Estimate
         N_use = int(np.median(df.loc[mask, "num_bidders"]))
         c, FC = _cost_cdf_from_wins(wins, N_use)
-        
+
         if c.size > 0:
             curves.append((g["level"], g["label"], c, FC))
             # Save data points
             for ci, fi in zip(c, FC):
                 rows.append({
-                    "level": g["level"], "N_label": g["label"], 
-                    "N_used": N_use, "c": ci/1e6, "FC": fi
+                    "level": g["level"], "N_label": g["label"],
+                    "N_used": N_use, "c": ci / 1e6, "FC": fi
                 })
-            print(f"  [OK] {g['level']:<6} (N approx {N_use})")
+            logger.info(f"  [OK] {g['level']:<6} (N approx {N_use})")
 
     # --- Save Outputs ---
     # 1. CSV
@@ -141,11 +136,11 @@ def run(in_path, out_csv, out_pdf):
     if curves:
         plt.figure(figsize=(7.5, 5.2), dpi=140)
         colors = {'low': 'C0', 'median': 'C1', 'high': 'C2'}
-        
+
         for level, label, c, FC in curves:
-            plt.step(c/1e6, FC, where="post", label=f"{level.capitalize()} {label}", 
+            plt.step(c / 1e6, FC, where="post", label=f"{level.capitalize()} {label}",
                      color=colors.get(level, 'k'), lw=2)
-        
+
         plt.xlabel("Cost (millions $)")
         plt.ylabel(r"$\hat F_C(c)$")
         plt.title("Estimated Cost CDFs by Competition Level")
@@ -155,11 +150,8 @@ def run(in_path, out_csv, out_pdf):
         plt.savefig(out_pdf, bbox_inches="tight")
         plt.close()
 
-    print(f"Done. Saved:\n  -> {out_csv}\n  -> {out_pdf}")
+    logger.info(f"Done. Saved:\n  -> {out_csv}\n  -> {out_pdf}")
+
 
 if __name__ == "__main__":
-    run(
-        in_path="data/bid_min_and_count.csv",
-        out_csv="data/FC_steps.csv",
-        out_pdf="data/FC_steps_plot.pdf"
-    )
+    main(in_path="data/bid_min_and_count.csv", out_csv="data/FC_steps.csv", out_pdf="data/FC_steps_plot.pdf")
