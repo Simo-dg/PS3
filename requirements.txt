@@ -1,24 +1,14 @@
-# CDOT Bid Tabs Scraper & GPV Estimation
-# Requirements for PS3 - Nonparametric Estimation of First Price Procurement Auction
-
-# Core scientific computing
+# Data
 numpy>=1.24.0
 pandas>=2.0.0
 scipy>=1.10.0
-
-# Plotting
 matplotlib>=3.7.0
-
-# Web scraping (for scrape.py)
-requests>=2.31.0
-beautifulsoup4>=4.12.0
-
-# Browser automation (for scrape.py)
-playwright>=1.40.0
-
-# PDF parsing (for data.py)
-pdfplumber>=0.10.0
-
-# Statistical analysis
 statsmodels>=0.14.0
 
+# Web scraping
+requests>=2.31.0
+beautifulsoup4>=4.12.0
+playwright>=1.40.0
+
+# PDF parsing
+pdfplumber>=0.10.0

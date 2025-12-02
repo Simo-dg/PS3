@@ -1,25 +1,21 @@
-# --- CDOT Bid Tabs scraper (Hyland DocPop/PdfPop) ---
-
-# ============================================================================
-# 1) IMPORTS & CONFIGURATION
-# ============================================================================
-
 import os
 import re
 import asyncio
 import base64
+import logging
 from typing import List, Tuple, Dict, Optional
 from urllib.parse import urljoin
-
 import requests
 from bs4 import BeautifulSoup
 import pandas as pd
 from playwright.async_api import async_playwright
 
-# Directories and settings
-PAGES = [
-    "https://www.codot.gov/business/bidding/bid-tab-archives/copy_of_bid-tabs-2023"
-]
+# Setup logging
+logger = logging.getLogger(__name__)
+logging.basicConfig(level=logging.INFO)
+
+# Scraper settings
+PAGE_URL = "https://www.codot.gov/business/bidding/bid-tab-archives/copy_of_bid-tabs-2023"
 BROWSER_UA = (
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
     "AppleWebKit/537.36 (KHTML, like Gecko) "
@@ -27,18 +23,16 @@ BROWSER_UA = (
 )
 DELAY_SECONDS = 0.3
 REQUEST_TIMEOUT = 45
+OUT_DIR = "../data"  # Output directory for PDFs and CSV
 
-OUT_DIR = "../data"
 
-# ============================================================================
-# 2) UTILITY FUNCTIONS
-# ============================================================================
 def slugify(text: str) -> str:
     """Convert text to a filesystem-safe filename."""
     text = re.sub(r"\s+", " ", text).strip()
     text = re.sub(r"[^\w\-\.\s\(\)]", "_", text)
     text = re.sub(r"\s", "_", text)
     return text[:120] or "file"
+
 
 def scrape_page_for_links(page_url: str) -> List[Tuple[str, str]]:
     """
@@ -47,14 +41,14 @@ def scrape_page_for_links(page_url: str) -> List[Tuple[str, str]]:
     """
     sess = requests.Session()
     sess.headers.update({"User-Agent": BROWSER_UA})
-    
+
     r = sess.get(page_url, timeout=REQUEST_TIMEOUT)
     r.raise_for_status()
-    
+
     soup = BeautifulSoup(r.text, "html.parser")
     anchors = [a for a in soup.find_all("a", href=True)
                if "hylandcloud.com" in a["href"] and "docpop" in a["href"]]
-    
+
     seen, items = set(), []
     for a in anchors:
         full = urljoin(page_url, a["href"])
@@ -65,21 +59,6 @@ def scrape_page_for_links(page_url: str) -> List[Tuple[str, str]]:
         items.append((text, full))
     return items
 
-def save_csv(rows: List[Tuple[str, str, str]], out_dir: str) -> str:
-    """Save the index of discovered bid tabs to a CSV file."""
-    csv_path = os.path.join(out_dir, "cdot_bid_tabs_index.csv")
-    with open(csv_path, "w", encoding="utf-8") as f:
-        f.write("page,anchor_text,docpop_url\n")
-        for page, text, url in rows:
-            page_csv = '"' + page.replace('"', '""') + '"'
-            text_csv = '"' + text.replace('"', '""') + '"'
-            url_csv = '"' + url.replace('"', '""') + '"'
-            f.write(f"{page_csv},{text_csv},{url_csv}\n")
-    return csv_path
-
-# ============================================================================
-# 3) BROWSER AUTOMATION
-# ============================================================================
 
 async def wait_for_pdf_url(page, timeout_ms: int = 20000):
     """Listen for network responses and capture the URL of the first PDF response."""
@@ -95,7 +74,7 @@ async def wait_for_pdf_url(page, timeout_ms: int = 20000):
                 ct = (resp.headers().get("content-type") or "").lower()
             except Exception:
                 ct = ""
-        
+
         if "application/pdf" in ct and not future.done():
             try:
                 future.set_result(resp.url)
@@ -104,7 +83,7 @@ async def wait_for_pdf_url(page, timeout_ms: int = 20000):
 
     page.on("response", handler)
     try:
-        return await asyncio.wait_for(future, timeout=timeout_ms/1000)
+        return await asyncio.wait_for(future, timeout=timeout_ms / 1000)
     except asyncio.TimeoutError:
         return None
     finally:
@@ -112,6 +91,7 @@ async def wait_for_pdf_url(page, timeout_ms: int = 20000):
             page.off("response", handler)
         except Exception:
             pass
+
 
 async def page_fetch_bytes(page, url: str) -> Optional[bytes]:
     """Fetch a URL from within the browser context using JavaScript."""
@@ -140,7 +120,8 @@ async def page_fetch_bytes(page, url: str) -> Optional[bytes]:
     except Exception:
         return None
 
-async def fetch_pdf_via_browser(context, docpop_url: str, out_path_pdf: str, out_path_html: str) -> bool:
+
+async def fetch_pdf_via_browser(context, docpop_url: str, out_path_pdf: str) -> bool:
     """
     Use Playwright to navigate to a DocPop URL and download the PDF.
     Listens for PDF responses during initial page load.
@@ -162,86 +143,72 @@ async def fetch_pdf_via_browser(context, docpop_url: str, out_path_pdf: str, out
     finally:
         await page.close()
 
-# ============================================================================
-# 4) MAIN SCRAPING ORCHESTRATION
-# ============================================================================
 
-async def run_cdot_scraper() -> pd.DataFrame:
+async def run_cdot_scraper(page_url:str = PAGE_URL) -> pd.DataFrame:
     """
     Main function to scrape CDOT bid tabs and download PDFs.
     Returns DataFrame containing metadata for all discovered bid tabs.
     """
+    # Setup output directories
     pdf_dir = os.path.join(OUT_DIR, "pdf")
     os.makedirs(OUT_DIR, exist_ok=True)
     os.makedirs(pdf_dir, exist_ok=True)
-    print(f"[INFO] Output folder: {OUT_DIR}")
-    print(f"[INFO] PDF folder: {pdf_dir}")
+    logger.info(f"Output folder: {OUT_DIR}")
+    logger.info(f"PDF folder: {pdf_dir}")
 
-    all_items: List[Tuple[str, str, str]] = []
-    for page_url in PAGES:
-        try:
-            items = scrape_page_for_links(page_url)
-            print(f"[OK] {page_url}: found {len(items)} DocPop links")
-            for text, docpop_url in items:
-                all_items.append((page_url, text, docpop_url))
-        except Exception:
-            print(f"[ERROR] {page_url}")
+    # Get all DocPop links from the specified page
+    all_links: List[Tuple[str, str, str]] = []
+    items = scrape_page_for_links(page_url)
+    logger.info(f"{page_url}: found {len(items)} DocPop links")
+    for text, docpop_url in items:
+        all_links.append((page_url, text, docpop_url))
 
+    # Process each DocPop link
     index_rows: List[Tuple[str, str, str]] = []
     rows: List[Dict[str, str]] = []
+    pw = await async_playwright().start()
+    browser = await pw.chromium.launch(headless=True)
+    context = await browser.new_context(user_agent=BROWSER_UA, accept_downloads=False)
 
-    pw = browser = context = None
-    try:
-        if all_items:
-            pw = await async_playwright().start()
-            browser = await pw.chromium.launch(headless=True)
-            context = await browser.new_context(user_agent=BROWSER_UA, accept_downloads=False)
+    for page_url, text, docpop_url in all_links:
+        index_rows.append((page_url, text, docpop_url))
+        saved_path = ""
+        status = "html_saved"
+        fname = f"{slugify(text)}.pdf"
+        out_pdf = os.path.join(pdf_dir, fname)
 
-        for page_url, text, docpop_url in all_items:
-            index_rows.append((page_url, text, docpop_url))
-            saved_path = ""
-            status = "html_saved"
-            fname = f"{slugify(text)}.pdf"
-            out_pdf = os.path.join(pdf_dir, fname)
-            if context:
-                ok = await fetch_pdf_via_browser(context, docpop_url, out_pdf)
-                if ok:
-                    saved_path = out_pdf
-                    status = "saved"
-                    print(f"[OK] {fname}")
-                else:
-                    print(f"[WARN] Not a PDF.")
-                await asyncio.sleep(DELAY_SECONDS)
-            rows.append({
-                "page": page_url,
-                "anchor_text": text,
-                "docpop_url": docpop_url,
-                "saved_path": saved_path,
-                "status": status,
-            })
-    finally:
-        try:
-            csv_path = save_csv(index_rows, OUT_DIR)
-            print(f"[OK] Index CSV: {csv_path}")
-        except Exception:
-            print(f"[WARN] Unable to write CSV")
-        if context:
-            await context.close()
-        if browser:
-            await browser.close()
-        if pw:
-            await pw.stop()
-    df = pd.DataFrame(rows)
+        ok = await fetch_pdf_via_browser(context, docpop_url, out_pdf)
+        if ok:
+            saved_path = out_pdf
+            status = "saved"
+            logger.info(f"Successfully saved {fname}")
+        else:
+            logger.warning(f"Not a PDF: {docpop_url}")
+        await asyncio.sleep(DELAY_SECONDS)
+        rows.append({
+            "page": page_url,
+            "anchor_text": text,
+            "docpop_url": docpop_url,
+            "saved_path": saved_path,
+            "status": status,
+        })
+
+    # Save index CSV
+    csv_path = os.path.join(OUT_DIR, "cdot_bid_tabs_index.csv")
+    df = pd.DataFrame(rows, columns=["page", "anchor_text", "docpop_url"])
+    df.to_csv(csv_path, index=False)
+    logger.info(f"Saved CSV: {csv_path}")
+
+    await context.close()
+    await browser.close()
+    await pw.stop()
     return df
 
-# ============================================================================
-# 5) MAIN ENTRY POINT
-# ============================================================================
 
 async def main():
-    """Entry point when running as a script."""
     df = await run_cdot_scraper()
     return df
+
 
 if __name__ == "__main__":
     asyncio.run(main())

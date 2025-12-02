@@ -1,6 +1,3 @@
-# ============================================================================
-# CDOT BID TAB PDF PARSER
-# ============================================================================
 """
 Parse CDOT Bid Tab summary tables (Rank/Vendor/Total Bid) from PDFs in data/pdf/
 and write CSV (file, num_bidders, lowest_bid) to data/bid_min_and_count.csv.
@@ -15,50 +12,43 @@ The target is the "Vendor Ranking" page which contains:
 - Total Bid amount
 - Percent of Low Bid
 - Percent of Estimate
-
-Usage:
-  python -m src.data --pdf-dir data/pdf --out data/bid_min_and_count.csv
-
-Requires: pip install pdfplumber
 """
-
-# ============================================================================
-# IMPORTS
-# ============================================================================
-
 import re
-import csv
-import argparse
 from pathlib import Path
 from decimal import Decimal, InvalidOperation
 from typing import List, Optional, Tuple
-
+import pandas as pd
 import pdfplumber
+import logging
+
+# Setup logging
+logger = logging.getLogger(__name__)
+logging.basicConfig(level=logging.INFO)
 
 # Default paths
 DEFAULT_PDF_DIR = "data/pdf"
 DEFAULT_OUT = "data/bid_min_and_count.csv"
 
-# ============================================================================
-# HELPER FUNCTIONS - TEXT NORMALIZATION AND PARSING
-# ============================================================================
+# Regex to match money amounts: $1,234.56 or 1234.56
+_money_rx = re.compile(r"\$?\s*\d{1,3}(?:,\d{3})*(?:\.\d{2})?")
+# Regex to detect "Vendor Ranking" page
+_vendor_ranking_rx = re.compile(r"vendor\s+ranking", re.I)
+# Regex to parse data lines: "1 VENDOR-ID Vendor Name $123,456.78 98.5% 95.2%"
+_rank_vendor_line_rx = re.compile(r"^\s*(\d{1,2})\s+\S+\s+.*?(\$\s*\d{1,3}(?:,\d{3})*(?:\.\d{2})?)\s+[\d.]+%\s+[\d.]+%",re.I)
+
 
 def _norm(s: str) -> str:
     """Strip whitespace from string."""
     return (s or "").strip()
 
-# Regex to match money amounts: $1,234.56 or 1234.56
-_money_rx = re.compile(r"\$?\s*\d{1,3}(?:,\d{3})*(?:\.\d{2})?")
 
 def _parse_money(s: str) -> Optional[Decimal]:
     """
     Parse a money string into a Decimal.
-    
     Handles formats like: $1,234.56, 1234.56, $1234, etc.
     
     Args:
         s: String containing a money amount
-        
     Returns:
         Decimal value or None if parsing fails
     """
@@ -76,15 +66,8 @@ def _parse_money(s: str) -> Optional[Decimal]:
         m = re.search(r"([0-9]+(?:\.[0-9]{1,2})?)", s)
         return Decimal(m.group(1)) if m else None
 
-# ============================================================================
-# LINE-BASED EXTRACTION
-# ============================================================================
-# Uses regex patterns on extracted text lines to parse vendor ranking tables.
 
-# Regex to detect "Vendor Ranking" page
-_vendor_ranking_rx = re.compile(r"vendor\s+ranking", re.I)
-# Regex to parse data lines: "1 VENDOR-ID Vendor Name $123,456.78 98.5% 95.2%"
-_rank_vendor_line_rx = re.compile(r"^\s*(\d{1,2})\s+\S+\s+.*?(\$\s*\d{1,3}(?:,\d{3})*(?:\.\d{2})?)\s+[\d.]+%\s+[\d.]+%", re.I)
+# Uses regex patterns on extracted text lines to parse vendor ranking tables.
 
 def _extract_summary_from_page_lines(page) -> List[Tuple[int, Decimal]]:
     """
@@ -102,7 +85,7 @@ def _extract_summary_from_page_lines(page) -> List[Tuple[int, Decimal]]:
         List of tuples: (rank, total_bid_amount) for ranks >= 1
     """
     bidders: List[Tuple[int, Decimal]] = []
-    
+
     # Extract text from page
     text = page.extract_text(x_tolerance=2, y_tolerance=3) or ""
     if not text:
@@ -120,42 +103,33 @@ def _extract_summary_from_page_lines(page) -> List[Tuple[int, Decimal]]:
         # Skip row 0 (Engineer's Estimate) - typically starts with "0 -EST-" or "0 EST"
         if re.match(r"^\s*0\s+", ln):
             continue
-        
         # Try to match the expected line format
         m = _rank_vendor_line_rx.match(ln)
         if not m:
             continue
-        
         # Extract rank (group 1)
         rank = int(m.group(1))
         if rank <= 0:
             continue
-        
         # Extract and parse bid amount (group 2)
         amt = _parse_money(m.group(2))
         if amt is None or amt < 1000:
             continue
-        
-        bidders.append((rank, amt))
 
+        bidders.append((rank, amt))
     return bidders
 
-# ============================================================================
-# ORCHESTRATION - PDF PROCESSING AND OUTPUT
-# ============================================================================
 
 def _extract_two_metrics_from_pdf(pdf_path: Path) -> Tuple[int, Optional[Decimal]]:
     """
     Extract number of bidders and lowest bid from a PDF file.
     
-    Strategy:
     1. Check first 4 pages for "Vendor Ranking" table
     2. Use line-based regex extraction
     3. Return first successful extraction found
     
     Args:
         pdf_path: Path to PDF file to process
-        
     Returns:
         Tuple of (num_bidders, lowest_bid_amount)
         Returns (0, None) if extraction fails
@@ -180,64 +154,43 @@ def _extract_two_metrics_from_pdf(pdf_path: Path) -> Tuple[int, Optional[Decimal
                     lowest_bid = min(amounts) if amounts else None
                     break
     except Exception:
-        # Silently handle PDF parsing errors
-        pass
+        logger.warning(f"Failed to process PDF: {pdf_path}", exc_info=True)
 
     return num_bidders, lowest_bid
 
-def _write_csv(rows: List[Tuple[str, int, Optional[Decimal]]], out_path: str) -> None:
+
+def main(pdf_dir: str = DEFAULT_PDF_DIR, out_path: str = DEFAULT_OUT) -> pd.DataFrame:
     """
-    Write results to CSV file.
+    Parses PDFs and return results as DataFrame.
     
     Args:
-        rows: List of (file_path, num_bidders, lowest_bid) tuples
-        out_path: Output CSV file path
-    """
-    # Ensure output directory exists
-    Path(out_path).parent.mkdir(parents=True, exist_ok=True)
-    
-    with open(out_path, "w", newline="", encoding="utf-8") as f:
-        w = csv.writer(f)
-        # Write header
-        w.writerow(["file", "num_bidders", "lowest_bid"])
-        # Write data rows
-        for file_path, n, low in rows:
-            # Format lowest_bid as currency with 2 decimal places, or empty if None
-            w.writerow([file_path, n, f"{low:.2f}" if low is not None else ""])
+        pdf_dir: Directory containing PDF files (default: data/pdf)
+        out_path: Output CSV path (default: data/bid_min_and_count.csv)
 
-# ============================================================================
-# COMMAND LINE INTERFACE
-# ============================================================================
-
-def main():
+    Returns:
+        DataFrame with columns: file, num_bidders, lowest_bid
     """
-    Main entry point for command-line execution.
-    
-    Processes all PDFs in the specified directory and writes results to CSV.
-    """
-    # Parse command-line arguments
-    ap = argparse.ArgumentParser(description="Parse #bidders and winner's bid from CDOT summary tables.")
-    ap.add_argument("--pdf-dir", default=DEFAULT_PDF_DIR, help="Folder containing PDFs (default: data/pdf)")
-    ap.add_argument("--out", default=DEFAULT_OUT, help="CSV output path (default: data/bid_min_and_count.csv)")
-    ap.add_argument("--f", default=None, help="(ignored; for notebook kernels)")
-    args, unknown = ap.parse_known_args()
-    if unknown:
-        print("[INFO] Ignoring unknown args:", unknown)
-
-    # Find all PDF files in the specified directory (recursive)
-    pdfs = sorted(Path(args.pdf_dir).rglob("*.pdf"))
+    # Find all PDF files in the specified directory
+    pdfs = sorted(Path(pdf_dir).rglob("*.pdf"))
     results: List[Tuple[str, int, Optional[Decimal]]] = []
-    
+
     # Process each PDF
     for pdf in pdfs:
         n, low = _extract_two_metrics_from_pdf(pdf)
         results.append((str(pdf), n, low))
         # Print progress for each file
-        print(f"[OK] {Path(pdf).name}: bidders={n} | lowest={f'{low:.2f}' if low is not None else 'N/A'}")
+        logger.debug(f"Saved {Path(pdf).name}: bidders={n} | lowest={f'{low:.2f}' if low is not None else 'N/A'}")
 
-    # Write results to CSV
-    _write_csv(results, args.out)
-    print(f"[DONE] Wrote {args.out} with {len(results)} rows.")
+    # Create DataFrame
+    df = pd.DataFrame(results, columns=["file", "num_bidders", "lowest_bid"])
+
+    # Write to CSV
+    Path(out_path).parent.mkdir(parents=True, exist_ok=True)
+    df.to_csv(out_path, index=False)
+    logger.info(f"Success: wrote {out_path} with {len(results)} rows.")
+    # _write_csv(results, args.out)
+    return df
+
 
 if __name__ == "__main__":
     main()
