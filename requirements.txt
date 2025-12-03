@@ -12,3 +12,8 @@ playwright>=1.40.0
 
 # PDF parsing
 pdfplumber>=0.10.0
+pdf2image
+pytesseract
+
+# Other
+tqdm
