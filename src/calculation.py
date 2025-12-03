@@ -42,43 +42,52 @@ def _pick_groups(N_series: pd.Series, min_obs: int = 12, max_band: int = 2):
             band += 1
     return groups
 
-
-def _cost_cdf_from_wins(wins: np.ndarray, N_use: int, downsample: int = 140):
+def _cost_cdf_pdf_from_wins(wins: np.ndarray, N_use: int, downsample: int = 140):
     """
-    GPV Inversion: Recovers Cost CDF (F_C) from Winning Bids (W).
+    GPV Inversion: Recovers Cost CDF (F_C) and PDF (f_C) from Winning Bids (W).
     Steps:
       1. Estimate F_W (ECDF) and f_W (KDE).
       2. Pseudo-costs c = w - (1/(N-1)) * (1-F_W)/f_W.
-      3. Invert order statistics: F_C = 1 - (1 - F_Z)^(1/N).
+      3. Estimate F_z and f_z from pseudo-costs via ECDF + KDE.
+      4. Invert order statistics:
+         F_C = 1 - (1 - F_Z)^(1/N)
+         f_C = ((1 - F_Z)^(1/N - 1) * f_Z) / N
     """
     w = np.sort(np.asarray(wins, float))
-    if w.size < 5: return np.array([]), np.array([])
+    if w.size < 5:
+        return np.array([]), np.array([]), np.array([])
 
     # Step 1: Winning bid distributions
     n = w.size
     Fw = np.arange(1, n + 1) / n
-    kde = gaussian_kde(w, bw_method='scott')
-    fw = np.clip(kde.evaluate(w), 1e-10, None)
+    kde_w = gaussian_kde(w, bw_method='scott')
+    fw = np.clip(kde_w.evaluate(w), 1e-10, None)
 
     # Step 2: Pseudo-costs (Inverse Hazard Rate)
-    # Clip ratio to avoid numerical explosions at boundaries
     ratio = np.clip((1.0 - Fw) / fw, 0, np.percentile(w, 95) - np.percentile(w, 5))
-    c_win = w - (1 / (N_use - 1.0)) * ratio
+    c_win = w - (1.0 / (N_use - 1.0)) * ratio
 
-    # Step 3: Transform to Cost CDF
+    # Step 3: CDF/PDF of pseudo-costs z
     c_sorted = np.sort(c_win)
-    Fz = np.arange(1, n + 1) / n
-    Fc = 1.0 - np.power(1.0 - Fz, 1.0 / N_use)
+    n_c = c_sorted.size
+    Fz = np.arange(1, n_c + 1) / n_c      # ECDF dei pseudo-costi
+    kde_c = gaussian_kde(c_win, bw_method='scott')
+    fz = np.clip(kde_c.evaluate(c_sorted), 1e-10, None)  # PDF dei pseudo-costi
 
-    # Enforce monotonicity and downsample for plotting
+    # Step 4: CDF/PDF dei costi veri
+    Fc = 1.0 - np.power(1.0 - Fz, 1.0 / N_use)
+    fc = ((1.0 - Fz) ** (1.0 / N_use - 1.0)) * fz / N_use
+    fc[-1] = 0.0  # come nel codice del prof
+
+    # Enforce monotonicità della CDF e bounds [0,1]
     Fc = np.clip(np.maximum.accumulate(Fc), 0.0, 1.0)
 
+    # Downsample per plotting
     if c_sorted.size > downsample:
         step = max(1, c_sorted.size // downsample)
-        c_sorted, Fc = c_sorted[::step], Fc[::step]
+        c_sorted, Fc, fc = c_sorted[::step], Fc[::step], fc[::step]
 
-    return c_sorted, Fc
-
+    return c_sorted, Fc, fc
 
 def main(in_path, out_csv, out_pdf):
     logger.info(f"Loading data from: {in_path}")
@@ -115,15 +124,19 @@ def main(in_path, out_csv, out_pdf):
 
         # Estimate
         N_use = int(np.median(df.loc[mask, "num_bidders"]))
-        c, FC = _cost_cdf_from_wins(wins, N_use)
+        c, FC, fC = _cost_cdf_pdf_from_wins(wins, N_use)
 
         if c.size > 0:
-            curves.append((g["level"], g["label"], c, FC))
-            # Save data points
-            for ci, fi in zip(c, FC):
+            curves.append((g["level"], g["label"], c, FC, fC))
+            # Save data points (anche la pdf)
+            for ci, fi, fci in zip(c, FC, fC):
                 rows.append({
-                    "level": g["level"], "N_label": g["label"],
-                    "N_used": N_use, "c": ci / 1e6, "FC": fi
+                    "level": g["level"],
+                    "N_label": g["label"],
+                    "N_used": N_use,
+                    "c": ci / 1e6,   # in milioni
+                    "FC": fi,
+                    "fC": fci
                 })
             logger.info(f"  [OK] {g['level']:<6} (N approx {N_use})")
 
@@ -132,20 +145,41 @@ def main(in_path, out_csv, out_pdf):
     Path(out_csv).parent.mkdir(parents=True, exist_ok=True)
     pd.DataFrame(rows).to_csv(out_csv, index=False)
 
-    # 2. Plot
+        # 2. Plot: CDF + PDF
     if curves:
-        plt.figure(figsize=(7.5, 5.2), dpi=140)
         colors = {'low': 'C0', 'median': 'C1', 'high': 'C2'}
 
-        for level, label, c, FC in curves:
-            plt.step(c / 1e6, FC, where="post", label=f"{level.capitalize()} {label}",
-                     color=colors.get(level, 'k'), lw=2)
+        fig, axes = plt.subplots(nrows=2, ncols=1, figsize=(7.5, 7.0),
+                                 dpi=140, sharex=True)
 
-        plt.xlabel("Cost (millions $)")
-        plt.ylabel(r"$\hat F_C(c)$")
-        plt.title("Estimated Cost CDFs by Competition Level")
-        plt.legend()
-        plt.grid(True, alpha=0.3)
+        # CDFs
+        for level, label, c, FC, fC in curves:
+            axes[0].step(
+                c / 1e6, FC, where="post",
+                label=f"{level.capitalize()} {label}",
+                color=colors.get(level, 'k'), lw=2
+            )
+
+        axes[0].set_ylabel(r"$\hat F_C(c)$")
+        axes[0].set_title("Estimated Cost CDFs by Competition Level")
+        axes[0].legend()
+        axes[0].grid(True, alpha=0.3)
+
+        # PDFs
+        for level, label, c, FC, fC in curves:
+            axes[1].plot(
+            c / 1e6, fC,
+            label=f"{level.capitalize()} {label}",
+            color=colors.get(level, 'k'), lw=2,
+            drawstyle='steps-post'   
+        )
+
+        axes[1].set_xlabel("Cost (millions $)")
+        axes[1].set_ylabel(r"$\hat f_C(c)$")
+        axes[1].set_title("Estimated Cost PDFs by Competition Level")
+        axes[1].legend()
+        axes[1].grid(True, alpha=0.3)
+
         plt.tight_layout()
         plt.savefig(out_pdf, bbox_inches="tight")
         plt.close()
